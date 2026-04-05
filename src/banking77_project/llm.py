@@ -79,9 +79,11 @@ class GeminiIntentClassifier:
         self.client = genai.Client(api_key=api_key)
         self.config = config
         self.label_names = label_names
+        self.label_count = len(label_names)
+        self.label_index_block = "\n".join(f"{idx}: {label}" for idx, label in enumerate(label_names))
         self.train_df = train_df.reset_index(drop=True).copy()
         self.cache_dir = ensure_dir(config.resolve_path(config.paths.cache_dir) / "gemini")
-        self.embedding_cache_path = self.cache_dir / "embeddings.parquet"
+        self.vector_cache_path = self.cache_dir / "vectors.parquet"
 
         if config.llm.max_train_examples_for_retrieval:
             self.train_df = self.train_df.sample(
@@ -89,23 +91,69 @@ class GeminiIntentClassifier:
                 random_state=config.random_state,
             ).sort_values("record_id")
 
-        self.train_embeddings = self.embed_texts(
+        self.train_vectors = self.vectorize_texts(
             self.train_df["text"].tolist(),
-            task_type="RETRIEVAL_DOCUMENT",
             namespace="train_documents",
         )
 
-    def _load_embedding_cache(self) -> pd.DataFrame:
-        if self.embedding_cache_path.exists():
-            return pd.read_parquet(self.embedding_cache_path)
-        return pd.DataFrame(columns=["cache_key", "namespace", "text", "embedding"])
+    def _load_vector_cache(self) -> pd.DataFrame:
+        if self.vector_cache_path.exists():
+            return pd.read_parquet(self.vector_cache_path)
+        return pd.DataFrame(columns=["cache_key", "namespace", "text", "vector"])
 
-    def _save_embedding_cache(self, cache_df: pd.DataFrame) -> None:
-        cache_df.to_parquet(self.embedding_cache_path, index=False)
+    def _save_vector_cache(self, cache_df: pd.DataFrame) -> None:
+        cache_df.to_parquet(self.vector_cache_path, index=False)
 
     def _cache_key(self, text: str, namespace: str) -> str:
-        raw = f"{self.config.llm.embedding_model}::{namespace}::{text}"
+        raw = f"{self.config.llm.vectorization_model}::{namespace}::{text}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _vectorization_system_prompt(self) -> str:
+        return (
+            "You convert banking support questions into deterministic numeric vectors.\n"
+            "The vector space is the Banking77 intent taxonomy.\n"
+            "For every question, assign one score per label in the exact order provided.\n"
+            "Each score must be a float between 0.0 and 1.0 representing how compatible the query is with that label.\n"
+            "The output must be exhaustive across all labels, not just the top candidates.\n"
+            "Return strict JSON that matches the requested schema.\n"
+            "Be consistent across semantically similar questions."
+        )
+
+    def _vectorization_user_prompt(self, text: str) -> str:
+        return (
+            "Create an intent-affinity vector for the following customer banking query.\n\n"
+            f"Label order:\n{self.label_index_block}\n\n"
+            f"Customer query:\n{text}"
+        )
+
+    def _vector_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "scores": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "minItems": self.label_count,
+                    "maxItems": self.label_count,
+                }
+            },
+            "required": ["scores"],
+            "additionalProperties": False,
+        }
+
+    def _parse_vector_response(self, response: Any) -> list[float]:
+        raw_text = _response_text(response)
+        payload = json.loads(raw_text)
+        if not isinstance(payload, dict):
+            raise ValueError("Vectorization response was not a JSON object.")
+        scores = payload.get("scores")
+        if not isinstance(scores, list) or len(scores) != self.label_count:
+            raise ValueError("Vectorization response did not contain the expected number of scores.")
+
+        cleaned: list[float] = []
+        for score in scores:
+            cleaned.append(float(score))
+        return cleaned
 
     @retry(
         retry=retry_if_exception(_is_retryable),
@@ -113,16 +161,23 @@ class GeminiIntentClassifier:
         stop=stop_after_attempt(6),
         reraise=True,
     )
-    def _embed_batch(self, texts: list[str], task_type: str) -> list[list[float]]:
-        response = self.client.models.embed_content(
-            model=self.config.llm.embedding_model,
-            contents=texts,
-            config=types.EmbedContentConfig(taskType=task_type),
+    def _vectorize_one(self, text: str) -> list[float]:
+        response = self.client.models.generate_content(
+            model=self.config.llm.vectorization_model,
+            contents=self._vectorization_user_prompt(text),
+            config=types.GenerateContentConfig(
+                system_instruction=self._vectorization_system_prompt(),
+                temperature=0.0,
+                max_output_tokens=768,
+                seed=self.config.random_state,
+                response_mime_type="application/json",
+                response_json_schema=self._vector_schema(),
+            ),
         )
-        return [item.values for item in response.embeddings]
+        return self._parse_vector_response(response)
 
-    def embed_texts(self, texts: list[str], task_type: str, namespace: str) -> np.ndarray:
-        cache_df = self._load_embedding_cache()
+    def vectorize_texts(self, texts: list[str], namespace: str) -> np.ndarray:
+        cache_df = self._load_vector_cache()
         cache_lookup = cache_df.set_index("cache_key").to_dict("index")
 
         ordered_vectors: list[list[float] | None] = [None] * len(texts)
@@ -131,51 +186,50 @@ class GeminiIntentClassifier:
             cache_key = self._cache_key(text, namespace)
             cached = cache_lookup.get(cache_key)
             if cached:
-                ordered_vectors[index] = cached["embedding"]
+                ordered_vectors[index] = cached["vector"]
             else:
                 missing.append((index, cache_key, text))
 
         cached_count = len(texts) - len(missing)
         print(
-            f"[llm] Embeddings for '{namespace}': {cached_count}/{len(texts)} cached, {len(missing)} to request.",
+            f"[llm] Vectors for '{namespace}': {cached_count}/{len(texts)} cached, {len(missing)} to request.",
             flush=True,
         )
 
         if missing:
             new_rows: list[dict[str, Any]] = []
-            batch_starts = range(0, len(missing), self.config.llm.batch_size)
-            for start in tqdm(
-                batch_starts,
-                total=(len(missing) + self.config.llm.batch_size - 1) // self.config.llm.batch_size,
-                desc=f"Embedding {namespace}",
-                unit="batch",
-            ):
-                batch = missing[start : start + self.config.llm.batch_size]
-                batch_texts = [item[2] for item in batch]
-                embeddings = self._embed_batch(batch_texts, task_type=task_type)
-                for (index, cache_key, text), embedding in zip(batch, embeddings, strict=True):
-                    ordered_vectors[index] = embedding
+            max_workers = min(self.config.llm.vectorization_workers, max(1, len(missing)))
+            print(f"[llm] Vectorizing '{namespace}' with {max_workers} worker(s)...", flush=True)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._vectorize_one, text): (index, cache_key, text)
+                    for index, cache_key, text in missing
+                }
+                for future in tqdm(as_completed(futures), total=len(futures), desc=f"Vectorizing {namespace}", unit="query"):
+                    index, cache_key, text = futures[future]
+                    vector = future.result()
+                    ordered_vectors[index] = vector
                     new_rows.append(
                         {
                             "cache_key": cache_key,
                             "namespace": namespace,
                             "text": text,
-                            "embedding": embedding,
+                            "vector": vector,
                         }
                     )
 
             updated_cache = pd.concat([cache_df, pd.DataFrame(new_rows)], ignore_index=True)
             updated_cache = updated_cache.drop_duplicates(subset=["cache_key"], keep="last")
-            self._save_embedding_cache(updated_cache)
+            self._save_vector_cache(updated_cache)
 
         return np.asarray(ordered_vectors, dtype=np.float32)
 
     def retrieve_examples(self, query: str) -> list[dict[str, str]]:
-        query_embedding = self.embed_texts([query], task_type="RETRIEVAL_QUERY", namespace="query_text")[0]
-        return self.retrieve_examples_from_embedding(query_embedding)
+        query_vector = self.vectorize_texts([query], namespace="query_text")[0]
+        return self.retrieve_examples_from_vector(query_vector)
 
-    def retrieve_examples_from_embedding(self, query_embedding: np.ndarray) -> list[dict[str, str]]:
-        scores = _cosine_similarity_matrix(np.asarray([query_embedding], dtype=np.float32), self.train_embeddings)[0]
+    def retrieve_examples_from_vector(self, query_vector: np.ndarray) -> list[dict[str, str]]:
+        scores = _cosine_similarity_matrix(np.asarray([query_vector], dtype=np.float32), self.train_vectors)[0]
         top_indices = np.argsort(scores)[::-1][: self.config.llm.retrieval_top_k]
         examples: list[dict[str, str]] = []
         for idx in top_indices:
@@ -248,19 +302,19 @@ class GeminiIntentClassifier:
         stop=stop_after_attempt(6),
         reraise=True,
     )
-    def classify_one(self, query: str, query_embedding: np.ndarray | None = None) -> str:
+    def classify_one(self, query: str, query_vector: np.ndarray | None = None) -> str:
         examples = (
-            self.retrieve_examples_from_embedding(query_embedding)
-            if query_embedding is not None
+            self.retrieve_examples_from_vector(query_vector)
+            if query_vector is not None
             else self.retrieve_examples(query)
         )
         response = self.client.models.generate_content(
             model=self.config.llm.generation_model,
             contents=self._user_prompt(query, examples),
             config=types.GenerateContentConfig(
-                systemInstruction=self._system_prompt(),
+                system_instruction=self._system_prompt(),
                 temperature=self.config.llm.temperature,
-                maxOutputTokens=self.config.llm.max_output_tokens,
+                max_output_tokens=self.config.llm.max_output_tokens,
                 seed=self.config.random_state,
             ),
         )
@@ -290,10 +344,9 @@ def run_llm_experiment(
 
     print(f"[llm] Evaluation rows: {len(eval_df)}", flush=True)
     eval_texts = eval_df["text"].tolist()
-    print("[llm] Embedding evaluation queries...", flush=True)
-    eval_query_embeddings = classifier.embed_texts(
+    print("[llm] Vectorizing evaluation queries with gemini-2.5-flash...", flush=True)
+    eval_query_vectors = classifier.vectorize_texts(
         eval_texts,
-        task_type="RETRIEVAL_QUERY",
         namespace="query_text",
     )
 
@@ -303,7 +356,7 @@ def run_llm_experiment(
     def _predict_row(index: int) -> tuple[int, str, float]:
         text = eval_texts[index]
         start = time.perf_counter()
-        prediction = classifier.classify_one(text, query_embedding=eval_query_embeddings[index])
+        prediction = classifier.classify_one(text, query_vector=eval_query_vectors[index])
         latency = (time.perf_counter() - start) * 1000
         return index, prediction, latency
 
@@ -337,7 +390,7 @@ def run_llm_experiment(
     prediction_frame.to_parquet(output_dir / "test_predictions.parquet", index=False)
 
     result = {
-        "embedding_model": config.llm.embedding_model,
+        "vectorization_model": config.llm.vectorization_model,
         "generation_model": config.llm.generation_model,
         "evaluated_rows": len(eval_df),
         "mean_latency_ms": float(np.mean(latencies_ms)) if latencies_ms else 0.0,

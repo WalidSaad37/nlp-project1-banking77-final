@@ -45,14 +45,14 @@ class ClassicalConfig:
 @dataclass(slots=True)
 class LLMConfig:
     generation_model: str
-    embedding_model: str
+    vectorization_model: str
     retrieval_top_k: int
     temperature: float
     max_output_tokens: int
     benchmark_sample_size: int
     max_train_examples_for_retrieval: int | None
     max_test_examples: int | None
-    batch_size: int
+    vectorization_workers: int
 
 
 @dataclass(slots=True)

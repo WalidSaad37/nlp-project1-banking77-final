@@ -15,7 +15,7 @@ from banking77_project.classical import run_classical_experiment
 from banking77_project.business_case import generate_business_case
 from banking77_project.config import load_config
 from banking77_project.data import load_or_create_dataset
-from banking77_project.io_utils import ensure_dir, write_json
+from banking77_project.io_utils import ensure_dir, read_json, write_json
 from banking77_project.llm import _load_local_api_key, run_llm_experiment
 
 
@@ -109,6 +109,19 @@ def _print_result_summary(results: dict[str, object], summary_path: Path) -> Non
     print("-" * 56, flush=True)
     print(f"Summary file: {summary_path}", flush=True)
     print("=" * 56, flush=True)
+
+
+def _merge_with_existing_summary(summary_path: Path, results: dict[str, object]) -> dict[str, object]:
+    if not summary_path.exists():
+        return results
+
+    existing = read_json(summary_path)
+    if not isinstance(existing, dict):
+        return results
+
+    merged = dict(existing)
+    merged.update(results)
+    return merged
 
 
 def parse_args() -> argparse.Namespace:
@@ -218,10 +231,11 @@ def main() -> None:
             raise SystemExit(str(exc)) from exc
 
     summary_path = ensure_dir(config.resolve_path(config.paths.output_dir)) / "run_summary.json"
-    write_json(summary_path, results)
+    summary_payload = _merge_with_existing_summary(summary_path, results)
+    write_json(summary_path, summary_payload)
     _log(f"All requested work completed in {_format_seconds(time.perf_counter() - overall_start)}")
-    if results:
-        _print_result_summary(results, summary_path)
+    if summary_payload:
+        _print_result_summary(summary_payload, summary_path)
     print(json.dumps({"summary_path": str(summary_path)}, indent=2))
 
 

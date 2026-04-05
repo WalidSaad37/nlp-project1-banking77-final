@@ -13,7 +13,6 @@ C4_STANDARD_8_HOURLY_USD = 0.39534
 C4_STANDARD_2_HOURLY_USD = 0.096866
 GEMINI_FLASH_INPUT_PER_M_TOKENS_USD = 0.30
 GEMINI_FLASH_OUTPUT_PER_M_TOKENS_USD = 2.50
-GEMINI_EMBEDDING_INPUT_PER_M_TOKENS_USD = 0.15
 
 
 def _estimate_tokens_from_chars(char_count: float) -> float:
@@ -41,14 +40,25 @@ def generate_business_case(
     user_prompt_chars = len("Customer query:\n\n\nNearest labeled examples:\n\nPredict the most appropriate Banking77 label.")
     total_input_chars = len(system_prompt) + user_prompt_chars + avg_query_chars + example_block_chars
 
-    estimated_query_embedding_tokens = _estimate_tokens_from_chars(avg_query_chars)
+    label_block_chars = sum(len(label) + 6 for label in label_names)
+    vectorization_prompt_chars = len(
+        "Create an intent-affinity vector for the following customer banking query.\n\nLabel order:\n\n\nCustomer query:\n"
+    )
+    total_vectorization_input_chars = vectorization_prompt_chars + label_block_chars + avg_query_chars
+    estimated_vectorization_input_tokens = _estimate_tokens_from_chars(total_vectorization_input_chars)
+    estimated_vectorization_output_tokens = float(len(label_names) * 6)
     estimated_generation_input_tokens = _estimate_tokens_from_chars(total_input_chars)
     estimated_generation_output_tokens = 8.0
 
     monthly_classical_hosting_usd = C4_STANDARD_8_HOURLY_USD * HOURS_PER_MONTH
     monthly_llm_hosting_usd = C4_STANDARD_2_HOURLY_USD * HOURS_PER_MONTH
 
-    monthly_llm_embedding_cost_usd = estimated_query_embedding_tokens * GEMINI_EMBEDDING_INPUT_PER_M_TOKENS_USD
+    monthly_llm_vectorization_input_cost_usd = (
+        estimated_vectorization_input_tokens * GEMINI_FLASH_INPUT_PER_M_TOKENS_USD
+    )
+    monthly_llm_vectorization_output_cost_usd = (
+        estimated_vectorization_output_tokens * GEMINI_FLASH_OUTPUT_PER_M_TOKENS_USD
+    )
     monthly_llm_generation_input_cost_usd = (
         estimated_generation_input_tokens * GEMINI_FLASH_INPUT_PER_M_TOKENS_USD
     )
@@ -60,16 +70,21 @@ def generate_business_case(
     monthly_llm_api_cost_usd = (
         monthly_request_volume_millions
         * (
-            monthly_llm_embedding_cost_usd
+            monthly_llm_vectorization_input_cost_usd
+            + monthly_llm_vectorization_output_cost_usd
             + monthly_llm_generation_input_cost_usd
             + monthly_llm_generation_output_cost_usd
         )
     )
 
-    initial_train_embedding_tokens = _estimate_tokens_from_chars(float(train_df["text"].str.len().sum()))
-    one_time_train_embedding_cost_usd = (
-        initial_train_embedding_tokens / 1_000_000
-    ) * GEMINI_EMBEDDING_INPUT_PER_M_TOKENS_USD
+    initial_train_vectorization_input_tokens = _estimate_tokens_from_chars(
+        float(train_df["text"].str.len().sum()) + len(train_df) * (vectorization_prompt_chars + label_block_chars)
+    )
+    initial_train_vectorization_output_tokens = float(len(train_df) * len(label_names) * 6)
+    one_time_train_vectorization_cost_usd = (
+        (initial_train_vectorization_input_tokens / 1_000_000) * GEMINI_FLASH_INPUT_PER_M_TOKENS_USD
+        + (initial_train_vectorization_output_tokens / 1_000_000) * GEMINI_FLASH_OUTPUT_PER_M_TOKENS_USD
+    )
 
     recommendation = (
         "Choose the classical model for a production-first deployment unless the Gemini pipeline "
@@ -97,11 +112,11 @@ def generate_business_case(
             "llm_host_machine": "c4-standard-2",
             "llm_host_hourly_usd": C4_STANDARD_2_HOURLY_USD,
             "gemini_generation_model": config.llm.generation_model,
-            "gemini_embedding_model": config.llm.embedding_model,
+            "gemini_vectorization_model": config.llm.vectorization_model,
             "gemini_flash_input_price_per_m_tokens_usd": GEMINI_FLASH_INPUT_PER_M_TOKENS_USD,
             "gemini_flash_output_price_per_m_tokens_usd": GEMINI_FLASH_OUTPUT_PER_M_TOKENS_USD,
-            "gemini_embedding_price_per_m_tokens_usd": GEMINI_EMBEDDING_INPUT_PER_M_TOKENS_USD,
-            "estimated_query_embedding_tokens_per_request": estimated_query_embedding_tokens,
+            "estimated_vectorization_input_tokens_per_request": estimated_vectorization_input_tokens,
+            "estimated_vectorization_output_tokens_per_request": estimated_vectorization_output_tokens,
             "estimated_generation_input_tokens_per_request": estimated_generation_input_tokens,
             "estimated_generation_output_tokens_per_request": estimated_generation_output_tokens,
         },
@@ -109,10 +124,11 @@ def generate_business_case(
         "llm_monthly_cost_usd": monthly_llm_hosting_usd + monthly_llm_api_cost_usd,
         "llm_cost_breakdown_usd": {
             "host": monthly_llm_hosting_usd,
-            "query_embedding_api": monthly_llm_embedding_cost_usd,
+            "query_vectorization_input_api": monthly_llm_vectorization_input_cost_usd,
+            "query_vectorization_output_api": monthly_llm_vectorization_output_cost_usd,
             "generation_input_api": monthly_llm_generation_input_cost_usd,
             "generation_output_api": monthly_llm_generation_output_cost_usd,
-            "one_time_train_embedding_bootstrap": one_time_train_embedding_cost_usd,
+            "one_time_train_vectorization_bootstrap": one_time_train_vectorization_cost_usd,
         },
         "current_classical_baseline": classical_results,
         "current_llm_baseline": llm_results,
