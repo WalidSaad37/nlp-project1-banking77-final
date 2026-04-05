@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+
+configs/local_settings.py
+data/cache/gemini/
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+financial_project_dataset/
+financial_project_dataset.zip
+Final Project Assignment.pdf

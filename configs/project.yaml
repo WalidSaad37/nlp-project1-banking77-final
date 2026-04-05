@@ -1,0 +1,40 @@
+project_name: banking77_intent_comparison
+random_state: 42
+
+paths:
+  raw_data_dir: data/raw
+  processed_data_dir: data/processed
+  cache_dir: data/cache
+  output_dir: outputs
+
+dataset:
+  name: mteb/banking77
+  train_split: train
+  test_split: test
+
+preprocessing:
+  lowercase: true
+  expand_contractions: true
+  remove_punctuation: true
+  remove_digits: false
+  remove_stopwords: false
+  min_token_length: 2
+
+classical:
+  embedding_model: glove-wiki-gigaword-100
+  embedding_source: gensim
+  embedding_local_path: null
+  classifier_name: svm
+  svm_c: 2.0
+  benchmark_sample_size: 10
+
+llm:
+  generation_model: gemini-2.5-flash
+  embedding_model: gemini-embedding-001
+  retrieval_top_k: 5
+  temperature: 0.0
+  max_output_tokens: 128
+  benchmark_sample_size: 10
+  max_train_examples_for_retrieval: 5000
+  max_test_examples: null
+  batch_size: 32
