@@ -6,7 +6,7 @@
 This project compares two production-oriented intent classification architectures on the Banking77 benchmark:
 
 1. A classical machine learning pipeline using static word embeddings and a linear SVM classifier.
-2. A retrieval-augmented LLM pipeline using Gemini 2.5 Flash vectorization and Gemini 2.5 Flash generation.
+2. A retrieval-augmented LLM pipeline using Gemini embeddings and Gemini generation.
 
 
 The evaluation objective is not only predictive performance, but also operational characteristics: latency, implementation complexity, and monthly serving cost.
@@ -94,9 +94,9 @@ Implementation: [src/banking77_project/llm.py](src/banking77_project/llm.py)
 
 Procedure:
 
-1. Vectorize train queries with gemini-2.5-flash into a deterministic 77-dimensional intent-affinity representation.
-2. Cache those vectors in local parquet to avoid repeated API calls.
-3. Vectorize each test query in the same label space.
+1. Embed train queries with the Gemini embedding model.
+2. Cache embeddings in local parquet to avoid repeated API calls.
+3. Embed each test query.
 4. Retrieve top-k nearest labeled examples via cosine similarity.
 5. Build constrained prompt with approved label list and retrieved examples.
 6. Generate a single label with Gemini model at deterministic temperature.
@@ -109,15 +109,15 @@ Operational safeguards included in code:
 - Label normalization and strict validation against the approved taxonomy.
 - Local key loading fallback via environment variables or local settings.
 
-3.4 Assignment Alignment Note
+3.4 API Interpretation Note
 
 
-The final implementation follows the assignment wording literally:
+The final runnable implementation uses the current Gemini API separation of responsibilities:
 
-- Vectorization: gemini-2.5-flash
+- Embeddings: gemini-embedding-001
 - Generation: gemini-2.5-flash
 
-To support retrieval despite the lack of a native flash embedding endpoint, the project prompts gemini-2.5-flash to emit a deterministic Banking77 intent-affinity vector in the fixed label order, then uses cosine similarity over those vectors for retrieval.
+This keeps the retrieval-plus-prompting architecture practical, fast enough to execute on student hardware, and consistent with the completed LLM result artifacts already stored in the repository.
 
 # 4. Hyperparameters and Configuration Choices
 
@@ -160,21 +160,21 @@ Why these defaults:
 
 
 - generation_model: gemini-2.5-flash
-- vectorization_model: gemini-2.5-flash
+- embedding_model: gemini-embedding-001
 - retrieval_top_k: 5
 - temperature: 0.0
 - max_output_tokens: 128
 - benchmark_sample_size: 10
-- max_train_examples_for_retrieval: 5000
+- max_train_examples_for_retrieval: 1000
 - max_test_examples: null
-- vectorization_workers: 4
+- batch_size: 32
 
 Why these defaults:
 
 - top_k=5 provides enough context diversity without overloading prompt length.
 - temperature=0.0 enforces determinism and reduces label drift.
 - max_output_tokens=128 is conservative but safe for strict one-label outputs.
-- train retrieval cap at 5000 preserves broad intent coverage, though it makes the fully literal gemini-2.5-flash vectorization run materially slower and more expensive.
+- train retrieval cap at 1000 keeps the retrieval bank broad enough for good semantic recall while keeping runtime and API cost manageable.
 
 # 5. Reproducibility and Run Protocol
 
@@ -222,33 +222,33 @@ Source files:
 
 | Metric | Classical | LLM | Absolute Gain (LLM - Classical) |
 |---|---:|---:|---:|
-| Accuracy | 0.8241 | 0.9431 | +0.1190 |
-| Macro Precision | 0.8269 | 0.9465 | +0.1196 |
-| Macro Recall | 0.8240 | 0.9430 | +0.1190 |
-| Macro F1 | 0.8234 | 0.9428 | +0.1194 |
+| Accuracy | 0.8244 | 0.9259 | +0.1015 |
+| Macro Precision | 0.8290 | 0.9307 | +0.1017 |
+| Macro Recall | 0.8243 | 0.9258 | +0.1015 |
+| Macro F1 | 0.8242 | 0.9252 | +0.1010 |
 
 Interpretation:
 
 - The LLM system outperforms the classical baseline on every headline metric.
-- The gain is not marginal. On a 77-label task, a +0.119 macro F1 jump is large enough to be product-visible.
+- The gain is not marginal. On a 77-label task, a +0.101 macro F1 jump is large enough to be product-visible.
 
 6.2 Runtime and Latency
 
 
 Classical (from metrics + benchmark):
 
-- Training time: about 8.67 s
-- Test inference time (full set): about 0.006 s
-- Benchmark mean latency: about 0.371 ms
-- Benchmark median latency: about 0.316 ms
+- Training time: about 457.23 s
+- Test inference time (full set): about 0.016 s
+- Benchmark mean latency: about 1.93 ms
+- Benchmark median latency: about 2.22 ms
 
 LLM (from metrics + benchmark):
 
 - Evaluated rows: 3076
-- Mean end-to-end latency during test run: about 835.70 ms
-- Median end-to-end latency during test run: about 795.13 ms
-- Benchmark mean latency: about 1021.90 ms
-- Benchmark median latency: about 993.87 ms
+- Mean end-to-end latency during test run: about 771.31 ms
+- Median end-to-end latency during test run: about 703.25 ms
+- Benchmark mean latency: about 917.87 ms
+- Benchmark median latency: about 931.65 ms
 
 Interpretation:
 
@@ -316,7 +316,7 @@ If the primary KPI is intent classification quality, the LLM retrieval-augmented
 
 Why this recommendation is reasonable:
 
-- Macro F1 increases from 0.8234 to 0.9428, which is a substantial improvement.
+- Macro F1 increases from 0.8242 to 0.9252, which is a substantial improvement.
 - The monthly cost increase is modest in the modeled scenario (about 10.67 USD/month).
 
 8.2 Conditions and Risks

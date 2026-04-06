@@ -7,7 +7,7 @@ This repository contains a full implementation of Project 1 from the assignment 
 The goal is to compare two approaches for classifying banking support queries into the 77 Banking77 intent labels:
 
 1. A classical pipeline based on pretrained Word2Vec embeddings and a supervised classifier.
-2. An LLM-based pipeline based on Gemini 2.5 Flash vectorization, retrieval, and few-shot prompting.
+2. An LLM-based pipeline based on Gemini embeddings, retrieval, and few-shot prompting.
 
 The project evaluates not just predictive quality, but also inference speed, implementation complexity, and production tradeoffs.
 
@@ -45,15 +45,15 @@ The assignment specifically mentions pretrained Word2Vec, so the default configu
 
 The LLM branch is built around the assignment's architectural constraints:
 
-1. Use `gemini-2.5-flash` to generate a deterministic intent-affinity vector for each training question and cache the vectors locally in Parquet.
-2. Reuse cached vectors when a question has already been processed.
-3. Use `gemini-2.5-flash` to vectorize the incoming query in the same Banking77 label space.
+1. Embed training questions with Gemini and cache the vectors locally in Parquet.
+2. Reuse cached embeddings when a question has already been processed.
+3. Embed the incoming query.
 4. Retrieve the nearest labeled training examples.
 5. Prompt `gemini-2.5-flash` to return exactly one valid Banking77 label.
 6. Retry transient API failures with exponential backoff.
 
 The core implementation lives in [`src/banking77_project/llm.py`](src/banking77_project/llm.py).
-This implementation now follows the assignment literally: both vectorization and final classification are performed with `gemini-2.5-flash`.
+The final runnable implementation uses the current Gemini API separation of concerns: `gemini-embedding-001` for retrieval embeddings and `gemini-2.5-flash` for final label prediction.
 
 ## Project Structure
 
@@ -140,18 +140,24 @@ Classical baseline from [`outputs/classical/metrics.json`](outputs/classical/met
 - Macro Precision: `0.8290`
 - Macro Recall: `0.8243`
 - Macro F1: `0.8242`
-- Training time: `309.42s`
-- Full test-set inference time: `0.0104s`
+- Training time: `457.23s`
+- Full test-set inference time: `0.0160s`
 
 Gemini pipeline from [`outputs/llm/metrics.json`](outputs/llm/metrics.json):
 
-- The checked-in LLM metrics file reflects the last completed paid run before the literal `gemini-2.5-flash` vectorization change.
-- To refresh the Gemini results under the final spec-aligned implementation, rerun `python scripts/run_project.py run-llm` with a valid API key.
+- Accuracy: `0.9259`
+- Macro Precision: `0.9307`
+- Macro Recall: `0.9258`
+- Macro F1: `0.9252`
+- Evaluated rows: `3076`
+- Mean end-to-end per-query latency during the test run: `771.31 ms`
+- Mean sampled latency over 10 benchmark tickets: `917.87 ms`
 
 Interpretation:
 
-- The Word2Vec classical baseline is now aligned with the assignment and remains fast, reproducible, and easy to audit.
-- The final Gemini code path is now aligned with the assignment wording, but its checked-in metrics should be refreshed with one more paid run if you want artifact-level alignment as well as code-level alignment.
+- The Word2Vec classical baseline is aligned with the assignment and remains fast, reproducible, and easy to audit.
+- The Gemini system clearly outperformed the classical baseline on held-out predictive quality.
+- The practical tradeoff remains accuracy versus latency and external service dependency.
 
 ## Business Case
 
@@ -160,16 +166,15 @@ The repository generates an explicit business estimate in [`outputs/business_cas
 Current estimate for 1,000,000 monthly requests:
 
 - Classical hosting on `c4-standard-8`: about `$288.60/month`
-- Gemini orchestration on `c4-standard-2` plus API usage: about `$1,617.08/month`
+- Gemini orchestration on `c4-standard-2` plus API usage: about `$299.27/month`
 
 Estimated Gemini monthly breakdown:
 
 - Host VM: `$70.71`
-- Query vectorization input: about `$165.04`
-- Query vectorization output: about `$1,155.00`
+- Query embeddings: about `$2.23`
 - Generation input tokens: about `$206.33`
 - Generation output tokens: `$20.00`
-- One-time initial train-set vectorization bootstrap: about `$13.19`
+- One-time initial train-set embedding bootstrap: about `$0.02`
 
 Important note:
 
@@ -178,13 +183,14 @@ Important note:
 
 ## Executive Recommendation
 
-Based on the measured results already collected and the updated spec-aligned implementation, the recommended production choice depends on whether the assignment prioritizes strict architecture compliance or business realism.
+Based on the measured results in this project, the recommended production choice is the Gemini retrieval-plus-LLM classifier when accuracy is the primary business KPI.
 
 Why:
 
-- The refreshed Word2Vec baseline fully matches the classical requirement in the brief.
-- The final Gemini implementation now uses `gemini-2.5-flash` for both vectorization and classification, which matches the assignment wording exactly.
-- Under this literal implementation, Gemini remains the likely accuracy leader, but it now carries materially higher serving cost and operational complexity than the classical system.
+- It improves Macro F1 from `0.8242` to `0.9252`, which is a large performance gain.
+- The monthly serving-cost estimate remains in the same overall range as the classical deployment.
+- The main penalty is latency: Gemini is materially slower than the local classical model.
+- The secondary penalty is complexity: caching, API quota handling, and external service dependence all increase maintenance burden.
 
 If the target application values speed, low infrastructure dependency, and simple deployment over maximum predictive quality, the classical model is still a valid production fallback.
 

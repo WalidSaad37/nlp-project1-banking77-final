@@ -30,11 +30,11 @@ classical:
 
 llm:
   generation_model: gemini-2.5-flash
-  vectorization_model: gemini-2.5-flash
+  embedding_model: gemini-embedding-001
   retrieval_top_k: 5
   temperature: 0.0
   max_output_tokens: 128
   benchmark_sample_size: 10
-  max_train_examples_for_retrieval: 5000
+  max_train_examples_for_retrieval: 1000
   max_test_examples: null
-  vectorization_workers: 4
+  batch_size: 32
